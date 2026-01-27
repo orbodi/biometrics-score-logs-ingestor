@@ -31,7 +31,7 @@ class SshServerConfig:
     remote_dir: str
 
 
-def _parse_ssh_servers(raw: str | None) -> List[SshServerConfig]:
+def _parse_ssh_servers(raw: Optional[str]) -> List[SshServerConfig]:
     """
     Parse SSH_SERVERS depuis l'env.
 
@@ -61,7 +61,7 @@ def _parse_ssh_servers(raw: str | None) -> List[SshServerConfig]:
     return servers
 
 
-def _load_ssh_servers_from_file(path_str: str | None) -> List[SshServerConfig]:
+def _load_ssh_servers_from_file(path_str: Optional[str]) -> List[SshServerConfig]:
     """
     Charge la configuration des serveurs depuis un fichier JSON.
 
