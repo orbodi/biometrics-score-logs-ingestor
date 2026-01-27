@@ -1,0 +1,13 @@
+[
+  {
+    "name": "server1",
+    "host": "192.168.0.10",
+    "remote_dir": "/var/log/biometrics"
+  },
+  {
+    "name": "server2",
+    "host": "192.168.0.11",
+    "remote_dir": "/var/log/biometrics"
+  }
+]
+
