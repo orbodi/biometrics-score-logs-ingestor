@@ -1,0 +1,11 @@
+Middleware de collecte et d'ingestion des logs biométriques pour la persistance en base de données.
+
+Fonctionnalités principales :
+
+🔄 Collecte automatisée des fichiers logs biométriques depuis les serveurs distants
+📝 Parsing et conversion des logs structurés en format JSON
+💾 Persistance des scores biométriques (facial, iris, empreintes) en base de données
+📊 Support des transactions RqType=IP (inscriptions biométriques)
+🔍 Gestion des multiples échantillons biométriques par enregistrement
+⚙️ Configuration flexible pour différents environnements
+📋 Logging et monitoring des opérations d'ingestion
