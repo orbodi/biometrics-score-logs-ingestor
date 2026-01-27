@@ -14,7 +14,10 @@ def configure_logging(level: str) -> None:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+from typing import List, Optional
+
+
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Ingestion des logs biométriques vers la base de données."
     )

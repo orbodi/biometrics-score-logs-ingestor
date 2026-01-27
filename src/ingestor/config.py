@@ -2,7 +2,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -17,11 +17,11 @@ class DatabaseSettings:
 @dataclass
 class AppSettings:
     log_level: str = "INFO"
-    db: DatabaseSettings | None = None
+    db: Optional[DatabaseSettings] = None
     input_dir: str = "inputs"
-    ssh_servers: List["SshServerConfig"] | None = None
-    ssh_user: str | None = None
-    ssh_password: str | None = None
+    ssh_servers: Optional[List["SshServerConfig"]] = None
+    ssh_user: Optional[str] = None
+    ssh_password: Optional[str] = None
 
 
 @dataclass

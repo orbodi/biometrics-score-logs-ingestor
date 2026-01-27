@@ -1,13 +1,11 @@
-from __future__ import annotations
-
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
 class FingerprintSample:
     sample_id: int
-    sample_type: str | None
+    sample_type: Optional[str]
     values: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -15,10 +13,10 @@ class FingerprintSample:
 class BiometricsRecord:
     rq_type: str
     re_id: str
-    face_score: int | None = None
-    left_eye_score: int | None = None
-    right_eye_score: int | None = None
-    raw: str | None = None
+    face_score: Optional[int] = None
+    left_eye_score: Optional[int] = None
+    right_eye_score: Optional[int] = None
+    raw: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
     fingerprint_samples: List[FingerprintSample] = field(default_factory=list)
 
