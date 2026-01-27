@@ -80,6 +80,14 @@ def _load_ssh_servers_from_file(path_str: Optional[str]) -> List[SshServerConfig
         return []
 
     path = Path(path_str)
+
+    # Si le chemin est relatif, on essaie d'abord par rapport au cwd,
+    # puis par rapport à la racine du projet (3 niveaux au-dessus de ce fichier).
+    if not path.is_absolute():
+        if not path.exists():
+            project_root = Path(__file__).resolve().parent.parent.parent
+            path = project_root / path_str
+
     if not path.exists():
         return []
 
