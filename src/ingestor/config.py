@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from dotenv import load_dotenv
+
 
 @dataclass
 class DatabaseSettings:
@@ -101,7 +103,9 @@ def _load_ssh_servers_from_file(path_str: Optional[str]) -> List[SshServerConfig
 
 
 def load_settings() -> AppSettings:
-    """Charge la configuration à partir des variables d'environnement."""
+    """Charge la configuration à partir des variables d'environnement et du fichier .env."""
+    # Charge le fichier .env s'il existe (une seule fois par process; inoffensif si rappelé)
+    load_dotenv()
     db = DatabaseSettings(
         host=os.getenv("DB_HOST", "localhost"),
         port=int(os.getenv("DB_PORT", "5432")),
