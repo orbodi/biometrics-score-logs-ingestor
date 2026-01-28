@@ -17,7 +17,7 @@ def _ensure_input_dir(path: str) -> Path:
     return p
 
 
-def _collect_from_server(server: SshServerConfig, dest_dir: Path, username: str, password: str) -> int:
+def _collect_from_server(server: SshServerConfig, dest_dir: Path, username: str, password: str, timeout: int = 30) -> int:
     """
     Copie les fichiers .log depuis un serveur distant via SSH/SFTP.
 
@@ -31,8 +31,12 @@ def _collect_from_server(server: SshServerConfig, dest_dir: Path, username: str,
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-    logger.info("Connexion SSH à %s@%s", username, server.host)
-    ssh.connect(server.host, username=username, password=password)
+    logger.info("Connexion SSH à %s@%s (timeout: %ds)", username, server.host, timeout)
+    try:
+        ssh.connect(server.host, username=username, password=password, timeout=timeout)
+    except Exception as e:
+        logger.error("Échec de la connexion SSH à %s@%s: %s", username, server.host, e)
+        raise
 
     try:
         sftp = ssh.open_sftp()
@@ -82,9 +86,11 @@ def collect_from_servers(settings: AppSettings) -> int:
 
     for server in settings.ssh_servers:
         try:
-            total += _collect_from_server(server, dest_dir, settings.ssh_user, settings.ssh_password)
+            total += _collect_from_server(
+                server, dest_dir, settings.ssh_user, settings.ssh_password, settings.ssh_timeout
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Erreur lors de la collecte depuis %s: %s", server.host, exc)
+            logger.exception("Erreur lors de la collecte depuis %s (%s): %s", server.host, server.name, exc)
 
     logger.info("Collecte terminée, %d nouveau(x) fichier(s) téléchargé(s).", total)
     return total

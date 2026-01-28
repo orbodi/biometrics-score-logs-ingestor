@@ -24,6 +24,7 @@ class AppSettings:
     ssh_servers: Optional[List["SshServerConfig"]] = None
     ssh_user: Optional[str] = None
     ssh_password: Optional[str] = None
+    ssh_timeout: int = 30
 
 
 @dataclass
@@ -134,5 +135,6 @@ def load_settings() -> AppSettings:
         ssh_servers=ssh_servers,
         ssh_user=os.getenv("SSH_USER"),
         ssh_password=os.getenv("SSH_PASSWORD"),
+        ssh_timeout=int(os.getenv("SSH_TIMEOUT", "30")),
     )
 
