@@ -21,6 +21,7 @@ class AppSettings:
     log_level: str = "INFO"
     db: Optional[DatabaseSettings] = None
     input_dir: str = "inputs"
+    output_json_dir: str = "outputs"
     ssh_servers: Optional[List["SshServerConfig"]] = None
     ssh_user: Optional[str] = None
     ssh_password: Optional[str] = None
@@ -132,6 +133,7 @@ def load_settings() -> AppSettings:
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         db=db,
         input_dir=os.getenv("INPUT_DIR", "inputs"),
+        output_json_dir=os.getenv("OUTPUT_JSON_DIR", "outputs"),
         ssh_servers=ssh_servers,
         ssh_user=os.getenv("SSH_USER"),
         ssh_password=os.getenv("SSH_PASSWORD"),
