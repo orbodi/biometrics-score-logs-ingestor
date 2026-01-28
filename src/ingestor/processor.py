@@ -27,17 +27,61 @@ def _record_to_dict(record: BiometricsRecord) -> dict:
     """
     Convertit un BiometricsRecord en dict prêt à être sérialisé en JSON.
 
-    Version simple : on aplatit les champs principaux + `extra`.
+    Version structurée pour les lignes RqType=IP.
     """
-    data = {
+    if record.rq_type != "IP":
+        # Pour l'instant on ne sérialise que les IP (filtrées en amont normalement)
+        return {"rq_type": record.rq_type, "re_id": record.re_id}
+
+    result: dict = {
         "rq_type": record.rq_type,
-        "re_id": record.re_id,
-        "face_score": record.face_score,
-        "left_eye_score": record.left_eye_score,
-        "right_eye_score": record.right_eye_score,
+        "transaction_id": record.re_id,
+        "status_code": record.status_code,
+        "raw_line": record.raw,
     }
-    data.update(record.extra)
-    return data
+
+    # Face
+    if (
+        record.face_sample_id is not None
+        or record.face_sample_type is not None
+        or record.face_score is not None
+    ):
+        result["face"] = {
+            "sample_id": record.face_sample_id,
+            "sample_type": record.face_sample_type,
+            "score": record.face_score,
+        }
+
+    # Iris
+    if (
+        record.iris_sample_id is not None
+        or record.left_eye_score is not None
+        or record.right_eye_score is not None
+    ):
+        result["iris"] = {
+            "sample_id": record.iris_sample_id,
+            "left": record.left_eye_score,
+            "right": record.right_eye_score,
+        }
+
+    # Empreintes
+    fingerprints_json = []
+    for fp in record.fingerprint_samples:
+        fingerprints_json.append(
+            {
+                "sample_id": fp.sample_id,
+                "sample_type": fp.sample_type,
+                "fingers": fp.values,
+            }
+        )
+    if fingerprints_json:
+        result["fingerprints"] = fingerprints_json
+
+    # Extra éventuel (champs non traités explicitement)
+    if record.extra:
+        result["extra"] = record.extra
+
+    return result
 
 
 def process_log_file(settings: AppSettings, log_path: Path) -> int:
