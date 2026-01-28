@@ -39,7 +39,8 @@ def _collect_from_server(
     archive_dir: Path,
     username: str,
     password: str,
-    timeout: int = 30,
+    timeout: int,
+    threshold,
 ) -> int:
     """
     Copie les fichiers .log depuis un serveur distant via SSH/SFTP.
@@ -156,6 +157,7 @@ def collect_from_servers(settings: AppSettings) -> int:
                 settings.ssh_user,
                 settings.ssh_password,
                 settings.ssh_timeout,
+                threshold,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Erreur lors de la collecte depuis %s (%s): %s", server.host, server.name, exc)
