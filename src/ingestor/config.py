@@ -23,6 +23,7 @@ class AppSettings:
     input_dir: str = "inputs"
     output_json_dir: str = "outputs"
     archive_dir: str = "archive"
+    execution_log_dir: str = "logs"
     ssh_servers: Optional[List["SshServerConfig"]] = None
     ssh_user: Optional[str] = None
     ssh_password: Optional[str] = None
@@ -136,6 +137,7 @@ def load_settings() -> AppSettings:
         input_dir=os.getenv("INPUT_DIR", "inputs"),
         output_json_dir=os.getenv("OUTPUT_JSON_DIR", "outputs"),
         archive_dir=os.getenv("ARCHIVE_DIR", "archive"),
+        execution_log_dir=os.getenv("EXECUTION_LOG_DIR", "logs"),
         ssh_servers=ssh_servers,
         ssh_user=os.getenv("SSH_USER"),
         ssh_password=os.getenv("SSH_PASSWORD"),
