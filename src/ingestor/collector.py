@@ -34,6 +34,7 @@ def _extract_file_date(filename: str):
 
 
 def _collect_from_server(
+    settings: AppSettings,
     server: SshServerConfig,
     dest_dir: Path,
     archive_dir: Path,
@@ -151,6 +152,7 @@ def collect_from_servers(settings: AppSettings) -> int:
     for server in settings.ssh_servers:
         try:
             total += _collect_from_server(
+                settings,
                 server,
                 dest_dir,
                 archive_dir,
