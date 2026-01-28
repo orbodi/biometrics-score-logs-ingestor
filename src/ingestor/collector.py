@@ -17,7 +17,14 @@ def _ensure_input_dir(path: str) -> Path:
     return p
 
 
-def _collect_from_server(server: SshServerConfig, dest_dir: Path, username: str, password: str, timeout: int = 30) -> int:
+def _collect_from_server(
+    server: SshServerConfig,
+    dest_dir: Path,
+    archive_dir: Path,
+    username: str,
+    password: str,
+    timeout: int = 30,
+) -> int:
     """
     Copie les fichiers .log depuis un serveur distant via SSH/SFTP.
 
@@ -54,8 +61,15 @@ def _collect_from_server(server: SshServerConfig, dest_dir: Path, username: str,
             remote_path = os.path.join(server.remote_dir, filename)
             local_path = server_dest_dir / filename
 
-            if local_path.exists():
-                logger.debug("Fichier déjà présent pour le serveur %s, on ignore: %s", server.name, local_path)
+            # Vérifie si le fichier existe déjà soit dans INPUT_DIR, soit dans ARCHIVE_DIR.
+            archived_path = archive_dir / server.name / filename
+            if local_path.exists() or archived_path.exists():
+                logger.debug(
+                    "Fichier déjà traité pour le serveur %s, on ignore: %s (ou archivé: %s)",
+                    server.name,
+                    local_path,
+                    archived_path,
+                )
                 continue
 
             logger.info("Téléchargement de %s vers %s", remote_path, local_path)
@@ -78,6 +92,7 @@ def collect_from_servers(settings: AppSettings) -> int:
         return 0
 
     dest_dir = _ensure_input_dir(settings.input_dir)
+    archive_dir = Path(settings.archive_dir).resolve()
     total = 0
 
     if not settings.ssh_user or not settings.ssh_password:
@@ -87,7 +102,12 @@ def collect_from_servers(settings: AppSettings) -> int:
     for server in settings.ssh_servers:
         try:
             total += _collect_from_server(
-                server, dest_dir, settings.ssh_user, settings.ssh_password, settings.ssh_timeout
+                server,
+                dest_dir,
+                archive_dir,
+                settings.ssh_user,
+                settings.ssh_password,
+                settings.ssh_timeout,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Erreur lors de la collecte depuis %s (%s): %s", server.host, server.name, exc)

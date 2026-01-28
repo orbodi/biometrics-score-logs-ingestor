@@ -35,8 +35,8 @@ def _record_to_dict(record: BiometricsRecord) -> dict:
 
     result: dict = {
         "rq_type": record.rq_type,
-        "transaction_id": record.re_id,
-        "status_code": record.status_code,
+        "re_id": record.re_id,
+        "re_code": record.status_code,
         "raw_line": record.raw,
     }
 
