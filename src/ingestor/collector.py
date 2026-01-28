@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import paramiko
 
 from .config import AppSettings, SshServerConfig
+from .state import is_file_already_processed
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +18,19 @@ def _ensure_input_dir(path: str) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _extract_file_date(filename: str):
+    """
+    Extrait une date YYYY-MM-DD du nom de fichier, ou None si introuvable/incorrecte.
+    """
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", filename)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def _collect_from_server(
@@ -58,14 +74,42 @@ def _collect_from_server(
             if not filename.lower().endswith(".log"):
                 continue
 
+            # Filtrage par date dans le nom du fichier (YYYY-MM-DD)
+            file_date = _extract_file_date(filename)
+            if not file_date:
+                logger.debug(
+                    "Nom de fichier sans date valide, on ignore pour le serveur %s: %s",
+                    server.name,
+                    filename,
+                )
+                continue
+            if file_date > threshold:
+                logger.debug(
+                    "Fichier trop récent pour le serveur %s (date=%s > seuil=%s), on ignore: %s",
+                    server.name,
+                    file_date,
+                    threshold,
+                    filename,
+                )
+                continue
+
             remote_path = os.path.join(server.remote_dir, filename)
             local_path = server_dest_dir / filename
 
-            # Vérifie si le fichier existe déjà soit dans INPUT_DIR, soit dans ARCHIVE_DIR.
+            # Vérifie si le fichier a déjà été traité selon le state SQLite.
+            if is_file_already_processed(settings, server.name, filename):
+                logger.debug(
+                    "Fichier déjà marqué comme traité (state) pour le serveur %s, on ignore: %s",
+                    server.name,
+                    filename,
+                )
+                continue
+
+            # Vérifie aussi la présence locale ou archivée (sécurité supplémentaire).
             archived_path = archive_dir / server.name / filename
             if local_path.exists() or archived_path.exists():
                 logger.debug(
-                    "Fichier déjà traité pour le serveur %s, on ignore: %s (ou archivé: %s)",
+                    "Fichier déjà présent localement ou archivé pour le serveur %s, on ignore: %s (ou archivé: %s)",
                     server.name,
                     local_path,
                     archived_path,
@@ -93,6 +137,10 @@ def collect_from_servers(settings: AppSettings) -> int:
 
     dest_dir = _ensure_input_dir(settings.input_dir)
     archive_dir = Path(settings.archive_dir).resolve()
+
+    # Seuil de date : on ne traite que les fichiers datés de la veille et avant.
+    today = date.today()
+    threshold = today - timedelta(days=1)
     total = 0
 
     if not settings.ssh_user or not settings.ssh_password:

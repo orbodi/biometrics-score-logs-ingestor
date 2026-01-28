@@ -1,11 +1,14 @@
+import hashlib
 import json
 import logging
+import re
 import shutil
 from pathlib import Path
 from typing import List
 
 from .config import AppSettings
 from .parser import BiometricsRecord, parse_file
+from .state import mark_file_processed
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +153,39 @@ def archive_log_file(settings: AppSettings, log_path: Path) -> None:
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Archivage de %s vers %s", log_path, dest_path)
     shutil.move(str(log_path), str(dest_path))
+
+    # Marque le fichier comme traité dans le state SQLite.
+    try:
+        # On déduit le serveur à partir du premier segment du chemin relatif (INPUT_DIR/<server>/...)
+        relative = log_path.resolve().relative_to(input_dir)
+        server_name = relative.parts[0] if isinstance(relative, Path) else None
+    except Exception:  # noqa: BLE001
+        server_name = None
+
+    filename = log_path.name
+
+    # On tente de parser la date à partir du nom (ex: quality.YYYY-MM-DD.log)
+    file_date = None
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", filename)
+    if m:
+        file_date = m.group(1)
+
+    # Calcul d'un hash sha256 pour info/diagnostic (sûr mais peut être coûteux sur de très gros fichiers)
+    hash_sha256 = None
+    try:
+        h = hashlib.sha256()
+        with dest_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        hash_sha256 = h.hexdigest()
+    except Exception:  # noqa: BLE001
+        logger.exception("Impossible de calculer le hash sha256 pour %s", dest_path)
+
+    if server_name:
+        try:
+            mark_file_processed(settings, server_name, filename, file_date=file_date, hash_sha256=hash_sha256)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Impossible de marquer le fichier %s/%s comme traité: %s", server_name, filename, exc)
 
 
 def process_all_logs(settings: AppSettings) -> int:
