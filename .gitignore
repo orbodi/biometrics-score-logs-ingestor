@@ -8,7 +8,7 @@ venv/
 .vscode/
 .idea/
 
-sample_data/
+sample-data/
 .DS_Store
 logs/
 *.log
