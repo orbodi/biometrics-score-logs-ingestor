@@ -24,6 +24,7 @@ class AppSettings:
     input_dir: str = "inputs"
     output_json_dir: str = "outputs"
     archive_dir: str = "archive"
+    archive_json_dir: str = "archive_json"
     execution_log_dir: str = "logs"
     state_db_path: str = "state/ingestor_state.db"
     ssh_servers: Optional[List["SshServerConfig"]] = None
@@ -140,6 +141,7 @@ def load_settings() -> AppSettings:
         input_dir=os.getenv("INPUT_DIR", "inputs"),
         output_json_dir=os.getenv("OUTPUT_JSON_DIR", "outputs"),
         archive_dir=os.getenv("ARCHIVE_DIR", "archive"),
+        archive_json_dir=os.getenv("ARCHIVE_JSON_DIR", "archive_json"),
         execution_log_dir=os.getenv("EXECUTION_LOG_DIR", "logs"),
         state_db_path=os.getenv("STATE_DB_PATH", "state/ingestor_state.db"),
         ssh_servers=ssh_servers,

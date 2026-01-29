@@ -148,7 +148,39 @@ def process_log_file(settings: AppSettings, log_path: Path) -> Tuple[int, int]:
         logger.exception("Erreur lors de la persistance en base pour %s: %s", log_path, exc)
         # On continue quand même (le JSONL est déjà écrit)
 
+    # ÉTAPE ARCHIVAGE JSONL : Archive le fichier JSONL après persistance
+    if persisted_rows > 0:
+        try:
+            archive_jsonl_file(settings, output_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Erreur lors de l'archivage du JSONL %s: %s", output_path, exc)
+            # On continue quand même (la persistance est déjà faite)
+
     return (len(ip_records), persisted_rows)
+
+
+def archive_jsonl_file(settings: AppSettings, jsonl_path: Path) -> None:
+    """
+    Archive le fichier JSONL traité dans ARCHIVE_JSON_DIR en conservant la structure relative.
+    """
+    archive_base = Path(settings.archive_json_dir).resolve()
+    output_base = Path(settings.output_json_dir).resolve()
+
+    try:
+        relative = jsonl_path.resolve().relative_to(output_base)
+    except ValueError:
+        # Si le fichier n'est pas sous OUTPUT_JSON_DIR, on le met à la racine d'ARCHIVE_JSON_DIR.
+        relative = jsonl_path.name
+
+    if isinstance(relative, Path):
+        dest_path = archive_base / relative
+    else:
+        dest_path = archive_base / relative
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Archivage du JSONL %s vers %s...", jsonl_path, dest_path)
+    shutil.move(str(jsonl_path), str(dest_path))
+    logger.info("✓ Fichier JSONL archivé avec succès")
 
 
 def archive_log_file(settings: AppSettings, log_path: Path) -> None:
