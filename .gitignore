@@ -9,6 +9,7 @@ venv/
 .idea/
 
 sample-data/
+./sample-data/
 .DS_Store
 logs/
 *.log
