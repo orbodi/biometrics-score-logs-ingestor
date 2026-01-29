@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import Column, Date, Integer, String, Text, create_engine
+from sqlalchemy import Column, Date, DateTime, Integer, String, Text, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import func
@@ -59,8 +59,7 @@ class BiometricScore(Base):
     # Technique
     raw_line = Column(Text, nullable=True)
     created_at = Column(
-        "created_at",
-        type_=datetime,
+        DateTime,
         server_default=func.now(),
         nullable=False,
     )
