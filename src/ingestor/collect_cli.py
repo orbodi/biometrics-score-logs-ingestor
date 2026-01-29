@@ -6,6 +6,7 @@ from typing import Tuple
 from .collector import collect_from_servers
 from .config import load_settings
 from .cli import configure_logging
+from .db import init_schema
 from .processor import process_all_logs
 
 
@@ -59,27 +60,45 @@ def main() -> int:
     logger = logging.getLogger("ingestor.collect")
     parsing_logger = logging.getLogger("ingestor.processor")
 
-    # 1) Collecte des nouveaux fichiers depuis les serveurs SSH
+    # Initialisation du schéma DB (création des tables si nécessaire)
+    if settings.db:
+        try:
+            logger.info("Initialisation de la base de données...")
+            init_schema(settings)
+            logger.info("Base de données initialisée avec succès.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Impossible d'initialiser le schéma DB (persistance désactivée): %s", exc)
+
+    # 1) ÉTAPE COPIE : Collecte des nouveaux fichiers depuis les serveurs SSH
+    logger.info("=== ÉTAPE 1: COPIE DES FICHIERS ===")
     logger.info("Démarrage de la collecte depuis les serveurs SSH configurés...")
     downloaded = collect_from_servers(settings)
-    logger.info("Collecte terminée: %d fichier(s) téléchargé(s).", downloaded)
-
-    # 2) Parsing + génération JSON + archivage des .log présents dans INPUT_DIR
-    logger.info("Démarrage du parsing des fichiers .log présents dans INPUT_DIR...")
-    processed_files = process_all_logs(settings)
-    if processed_files == 0:
-        logger.info("Aucun fichier .log à parser, arrêt du programme.")
+    if downloaded == 0:
+        logger.info("Aucun nouveau fichier à copier.")
     else:
-        logger.info("Parsing et archivage terminés pour %d fichier(s).", processed_files)
+        logger.info("Collecte terminée: %d fichier(s) téléchargé(s).", downloaded)
+
+    # 2) ÉTAPE PARSING + PERSISTANCE + ARCHIVAGE : Traitement des fichiers .log
+    logger.info("=== ÉTAPE 2: PARSING, PERSISTANCE ET ARCHIVAGE ===")
+    logger.info("Démarrage du parsing des fichiers .log présents dans INPUT_DIR...")
+    processed_files, total_rows_inserted = process_all_logs(settings)
+    if processed_files == 0:
+        logger.info("Aucun fichier .log à traiter, arrêt du programme.")
+    else:
+        logger.info("Traitement terminé: %d fichier(s) parsé(s), persisté(s) et archivé(s).", processed_files)
 
     # 3) Résumé de l'exécution ajouté en fin de chaque fichier de log
     summary = (
-        "=== RÉSUMÉ EXÉCUTION === "
-        f"fichiers_téléchargés={downloaded}, fichiers_log_traités={processed_files}, "
-        f"fichier_log_copie={copy_log_path.name}, fichier_log_parsing={parsing_log_path.name}"
+        "=== RÉSUMÉ EXÉCUTION ===\n"
+        f"  Fichiers copiés: {downloaded}\n"
+        f"  Fichiers parsés: {processed_files}\n"
+        f"  Lignes insérées en base: {total_rows_inserted}"
     )
     logger.info(summary)
     parsing_logger.info(summary)
+    
+    logger.info("=== EXÉCUTION TERMINÉE ===")
+    parsing_logger.info("=== EXÉCUTION TERMINÉE ===")
 
     return 0
 

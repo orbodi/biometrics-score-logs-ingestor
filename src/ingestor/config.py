@@ -14,6 +14,7 @@ class DatabaseSettings:
     name: str
     user: str
     password: str
+    schema: str = "public"
 
 
 @dataclass
@@ -125,6 +126,7 @@ def load_settings() -> AppSettings:
         name=os.getenv("DB_NAME", "biometrics"),
         user=os.getenv("DB_USER", "biometrics_user"),
         password=os.getenv("DB_PASSWORD", "change_me"),
+        schema=os.getenv("DB_SCHEMA", "public"),
     )
 
     ssh_servers = _load_ssh_servers_from_file(os.getenv("SSH_SERVERS_FILE"))

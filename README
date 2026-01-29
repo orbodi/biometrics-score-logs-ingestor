@@ -1,11 +1,235 @@
-Middleware de collecte et d'ingestion des logs biométriques pour la persistance en base de données.
+# Biometrics Score Logs Ingestor
 
-Fonctionnalités principales :
+Middleware de collecte et d'ingestion des logs biométriques pour la persistance en base de données PostgreSQL.
 
-🔄 Collecte automatisée des fichiers logs biométriques depuis les serveurs distants
-📝 Parsing et conversion des logs structurés en format JSON
-💾 Persistance des scores biométriques (facial, iris, empreintes) en base de données
-📊 Support des transactions RqType=IP (inscriptions biométriques)
-🔍 Gestion des multiples échantillons biométriques par enregistrement
-⚙️ Configuration flexible pour différents environnements
-📋 Logging et monitoring des opérations d'ingestion
+## 📋 Description
+
+Ce projet permet de collecter automatiquement les fichiers de logs biométriques depuis des serveurs distants via SSH, de les parser pour extraire les scores biométriques (visage, iris, empreintes), et de les persister dans une base de données PostgreSQL optimisée pour le reporting BI.
+
+## ✨ Fonctionnalités principales
+
+- 🔄 **Collecte automatisée** : Téléchargement des fichiers `.log` depuis plusieurs serveurs SSH
+- 📅 **Filtrage par date** : Traitement uniquement des fichiers de la veille et antérieurs
+- 🔍 **Déduplication robuste** : Prévention des doublons via SQLite (state) et vérification des fichiers locaux/archivés
+- 📝 **Parsing structuré** : Extraction des lignes `RqType=IP` (inscriptions biométriques)
+- 💾 **Persistance en base** : Insertion des scores dans une table fact optimisée pour le BI
+- 📊 **Format JSONL** : Génération de fichiers JSONL pour chaque fichier traité
+- 📦 **Archivage automatique** : Déplacement des fichiers traités vers un dossier d'archivage
+- 📋 **Logging détaillé** : Logs d'exécution avec statistiques (fichiers copiés, parsés, lignes insérées)
+- ⚙️ **Configuration flexible** : Configuration via fichiers `.env` et JSON
+
+## 🚀 Installation
+
+### Prérequis
+
+- Python 3.8+
+- PostgreSQL (pour la persistance)
+- Accès SSH aux serveurs sources des logs
+
+### Installation des dépendances
+
+```bash
+pip install -r requirements.txt
+```
+
+### Configuration
+
+1. **Copier le fichier de configuration d'exemple** :
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Configurer les variables d'environnement** dans `.env` :
+   - Paramètres de connexion PostgreSQL (host, port, database, user, password, schema)
+   - Répertoires (input, output, archive, logs)
+   - Configuration SSH (user, password, timeout)
+   - Chemin vers le fichier de configuration des serveurs
+
+3. **Configurer les serveurs SSH** dans `servers.json` (voir `servers.example.json`) :
+   ```json
+   [
+     {
+       "name": "server1",
+       "host": "192.168.0.10",
+       "remote_dir": "/var/log/biometrics"
+     }
+   ]
+   ```
+
+## 📖 Utilisation
+
+### Lancement du processus d'ingestion
+
+```bash
+python3 -m ingestor.collect_cli
+```
+
+### Workflow d'exécution
+
+Le programme suit ce workflow automatique :
+
+1. **Initialisation** : Création du schéma et des tables PostgreSQL si nécessaire
+2. **Étape 1 - Copie** : Collecte des nouveaux fichiers depuis les serveurs SSH
+   - Télécharge uniquement les fichiers de la veille et antérieurs
+   - Vérifie les doublons (SQLite + fichiers locaux/archivés)
+   - Place les fichiers dans `INPUT_DIR/<server_name>/`
+3. **Étape 2 - Parsing, Persistance et Archivage** :
+   - Parse chaque fichier `.log` et extrait les lignes `RqType=IP`
+   - Génère un fichier `.jsonl` dans `OUTPUT_JSON_DIR`
+   - Insère les données dans PostgreSQL (table `biometric_scores`)
+   - Archive le fichier `.log` dans `ARCHIVE_DIR`
+   - Marque le fichier comme traité dans SQLite
+
+### Résumé d'exécution
+
+À la fin de chaque exécution, un résumé est affiché dans les logs :
+
+```
+=== RÉSUMÉ EXÉCUTION ===
+  Fichiers copiés: 5
+  Fichiers parsés: 3
+  Lignes insérées en base: 1250
+```
+
+## 🗂️ Structure du projet
+
+```
+biometrics-score-logs-ingestor/
+├── src/
+│   └── ingestor/
+│       ├── __init__.py
+│       ├── cli.py              # Configuration du logging
+│       ├── collect_cli.py      # Point d'entrée principal
+│       ├── collector.py        # Collecte SSH des fichiers
+│       ├── config.py            # Chargement de la configuration
+│       ├── db.py                # Persistance PostgreSQL (SQLAlchemy)
+│       ├── models.py            # Modèles SQLAlchemy
+│       ├── parser.py            # Parsing des fichiers .log
+│       ├── processor.py         # Traitement (parsing, JSONL, archivage)
+│       └── state.py             # Gestion du state SQLite
+├── .env.example                 # Exemple de configuration
+├── servers.example.json         # Exemple de configuration serveurs
+├── schema.sql                   # Script SQL de référence
+├── requirements.txt             # Dépendances Python
+└── README                       # Ce fichier
+```
+
+## 🗄️ Base de données
+
+### Schéma configurable
+
+Le schéma PostgreSQL est configurable via la variable `DB_SCHEMA` dans `.env` (par défaut: `public`).
+
+### Table `biometric_scores`
+
+Table fact optimisée pour le reporting BI, avec une ligne par score biométrique :
+
+- **Contexte transaction** : `re_id`, `re_code`, `rq_type`, `log_date`, `server_name`, `source_file`
+- **Dimensions biométriques** : `modality` (FACE/IRIS/FINGER), `channel` (FACE/LEFT_EYE/RIGHT_EYE/RIGHT_THUMB/...), `sample_id`, `sample_type`
+- **Mesures** : `score`, `nbpk` (Nombre de points caractéristiques pour les empreintes)
+- **Métadonnées** : `raw_line`, `created_at`
+
+### Initialisation de la base
+
+Le schéma et les tables sont créés automatiquement au premier lancement via la fonction `init_schema()`.
+
+## 🔧 Configuration
+
+### Variables d'environnement (`.env`)
+
+| Variable | Description | Défaut |
+|----------|-------------|--------|
+| `DB_HOST` | Hôte PostgreSQL | `localhost` |
+| `DB_PORT` | Port PostgreSQL | `5432` |
+| `DB_NAME` | Nom de la base de données | `biometrics` |
+| `DB_USER` | Utilisateur PostgreSQL | `biometrics_user` |
+| `DB_PASSWORD` | Mot de passe PostgreSQL | - |
+| `DB_SCHEMA` | Schéma PostgreSQL | `public` |
+| `LOG_LEVEL` | Niveau de logging | `INFO` |
+| `INPUT_DIR` | Répertoire des fichiers collectés | `inputs` |
+| `OUTPUT_JSON_DIR` | Répertoire des fichiers JSONL | `outputs` |
+| `ARCHIVE_DIR` | Répertoire d'archivage | `archive` |
+| `EXECUTION_LOG_DIR` | Répertoire des logs d'exécution | `logs` |
+| `STATE_DB_PATH` | Chemin du fichier SQLite de state | `state/ingestor_state.db` |
+| `SSH_SERVERS_FILE` | Fichier JSON des serveurs | `servers.example.json` |
+| `SSH_USER` | Utilisateur SSH | - |
+| `SSH_PASSWORD` | Mot de passe SSH | - |
+| `SSH_TIMEOUT` | Timeout SSH (secondes) | `30` |
+
+### Fichier de configuration des serveurs (`servers.json`)
+
+Format JSON avec la liste des serveurs :
+
+```json
+[
+  {
+    "name": "server1",
+    "host": "192.168.0.10",
+    "remote_dir": "/var/log/biometrics"
+  }
+]
+```
+
+## 📊 Format des données
+
+### Format d'entrée (`.log`)
+
+Lignes avec `RqType=IP` contenant les scores biométriques :
+```
+RqType=IP ReId=ABC123 ... FaceSampleId=1 FaceScore=85 ... LeftEyeScore=90 RightEyeScore=88 ...
+```
+
+### Format de sortie (`.jsonl`)
+
+Fichiers JSONL avec un objet JSON par ligne :
+
+```json
+{
+  "rq_type": "IP",
+  "re_id": "ABC123",
+  "re_code": 0,
+  "face": {
+    "sample_id": 1,
+    "sample_type": "STILL",
+    "score": 85
+  },
+  "iris": {
+    "sample_id": 1,
+    "left": 90,
+    "right": 88
+  },
+  "fingerprints": [
+    {
+      "sample_id": 1,
+      "sample_type": "TENPRINT_SLAP",
+      "fingers": {
+        "right_thumb": {"score": 92, "nbpk": 45},
+        ...
+      }
+    }
+  ]
+}
+```
+
+## 🔒 Sécurité
+
+- Les identifiants SSH et les mots de passe de base de données sont stockés dans `.env` (à ne pas commiter)
+- Le fichier `.env` est ignoré par Git (voir `.gitignore`)
+- Validation des noms de schéma PostgreSQL pour éviter l'injection SQL
+
+## 📝 Logs
+
+Les logs d'exécution sont générés dans `EXECUTION_LOG_DIR` avec des fichiers horodatés :
+- `copie_logs_YYYYMMDD_HHMMSS.log` : Logs de la phase de copie
+- `parsing_logs_YYYYMMDD_HHMMSS.log` : Logs de la phase de parsing/persistance/archivage
+
+## 🧪 Tests
+
+```bash
+# Exécuter les tests
+python -m pytest tests/
+```
+
+## 📄 Licence
+
+[À compléter selon votre licence]

@@ -7,3 +7,11 @@ venv/
 .pytest_cache/
 .vscode/
 .idea/
+
+sample_data/
+.DS_Store
+logs/
+*.log
+tmp/
+*.sqlite3
+*.db
