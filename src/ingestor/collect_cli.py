@@ -7,7 +7,7 @@ from .collector import collect_from_servers
 from .config import load_settings
 from .cli import configure_logging
 from .db import init_schema
-from .processor import process_all_logs
+from .processor import persist_all_jsonl_files, process_all_logs
 
 
 def _configure_file_loggers(execution_log_dir: str) -> Tuple[Path, Path]:
@@ -78,20 +78,31 @@ def main() -> int:
     else:
         logger.info("Collecte terminée: %d fichier(s) téléchargé(s).", downloaded)
 
-    # 2) ÉTAPE PARSING + PERSISTANCE + ARCHIVAGE : Traitement des fichiers .log
-    logger.info("=== ÉTAPE 2: PARSING, PERSISTANCE ET ARCHIVAGE ===")
+    # 2) ÉTAPE PARSING : Parsing des fichiers .log et génération des JSONL
+    logger.info("=== ÉTAPE 2: PARSING DES FICHIERS .LOG ===")
     logger.info("Démarrage du parsing des fichiers .log présents dans INPUT_DIR...")
-    processed_files, total_rows_inserted = process_all_logs(settings)
+    processed_files = process_all_logs(settings)
     if processed_files == 0:
-        logger.info("Aucun fichier .log à traiter, arrêt du programme.")
+        logger.info("Aucun fichier .log à parser.")
     else:
-        logger.info("Traitement terminé: %d fichier(s) parsé(s), persisté(s) et archivé(s).", processed_files)
+        logger.info("Parsing terminé: %d fichier(s) parsé(s) et archivé(s).", processed_files)
 
-    # 3) Résumé de l'exécution ajouté en fin de chaque fichier de log
+    # 3) ÉTAPE PERSISTANCE : Persistance des JSONL en base puis archivage
+    logger.info("=== ÉTAPE 3: PERSISTANCE ET ARCHIVAGE DES JSONL ===")
+    logger.info("Démarrage de la persistance des fichiers JSONL présents dans OUTPUT_JSON_DIR...")
+    processed_jsonl_files, total_rows_inserted = persist_all_jsonl_files(settings)
+    if processed_jsonl_files == 0:
+        logger.info("Aucun fichier JSONL à persister.")
+    else:
+        logger.info("Persistance terminée: %d fichier(s) JSONL persisté(s) et archivé(s), %d lignes insérées.", 
+                   processed_jsonl_files, total_rows_inserted)
+
+    # 4) Résumé de l'exécution ajouté en fin de chaque fichier de log
     summary = (
         "=== RÉSUMÉ EXÉCUTION ===\n"
         f"  Fichiers copiés: {downloaded}\n"
         f"  Fichiers parsés: {processed_files}\n"
+        f"  Fichiers JSONL persistés: {processed_jsonl_files}\n"
         f"  Lignes insérées en base: {total_rows_inserted}"
     )
     logger.info(summary)

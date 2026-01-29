@@ -8,8 +8,8 @@ from typing import List, Tuple
 
 from .config import AppSettings
 from .db import persist_records
-from .parser import BiometricsRecord, parse_file
-from .state import mark_file_processed
+from .parser import BiometricsRecord, FingerprintSample, parse_file
+from .state import is_jsonl_already_persisted, mark_file_processed, mark_jsonl_persisted
 
 logger = logging.getLogger(__name__)
 
@@ -88,22 +88,68 @@ def _record_to_dict(record: BiometricsRecord) -> dict:
     return result
 
 
-def process_log_file(settings: AppSettings, log_path: Path) -> Tuple[int, int]:
+def _dict_to_record(data: dict) -> BiometricsRecord:
+    """
+    Convertit un dict JSON (tel que créé par _record_to_dict) en BiometricsRecord.
+    Fonction inverse de _record_to_dict.
+    """
+    record = BiometricsRecord(
+        rq_type=data.get("rq_type", ""),
+        re_id=data.get("re_id", ""),
+        status_code=data.get("re_code"),
+        raw=data.get("raw_line"),
+    )
+
+    # Face
+    if "face" in data:
+        face_data = data["face"]
+        record.face_sample_id = face_data.get("sample_id")
+        record.face_sample_type = face_data.get("sample_type")
+        record.face_score = face_data.get("score")
+
+    # Iris
+    if "iris" in data:
+        iris_data = data["iris"]
+        record.iris_sample_id = iris_data.get("sample_id")
+        record.left_eye_score = iris_data.get("left")
+        record.right_eye_score = iris_data.get("right")
+
+    # Empreintes
+    if "fingerprints" in data:
+        for fp_data in data["fingerprints"]:
+            fp_sample = FingerprintSample(
+                sample_id=fp_data.get("sample_id", 0),
+                sample_type=fp_data.get("sample_type"),
+                values=fp_data.get("fingers", {}),
+            )
+            record.fingerprint_samples.append(fp_sample)
+
+    # Extra
+    if "extra" in data:
+        record.extra = data["extra"]
+
+    return record
+
+
+def process_log_file(settings: AppSettings, log_path: Path) -> int:
     """
     Parse un fichier .log et écrit un .jsonl correspondant dans OUTPUT_JSON_DIR.
+    Archive ensuite le .log traité dans ARCHIVE_DIR.
 
     - Ne garde que les lignes avec RqType=IP
     - Un record JSON par ligne dans un fichier .jsonl
-    - Archive ensuite le .log traité dans ARCHIVE_DIR (géré par le call site)
+    - Archive le .log après génération du JSONL
 
-    Retourne un tuple (nombre de records IP, nombre de lignes insérées en base).
+    Retourne le nombre de records IP écrits dans le JSONL.
     """
     records = parse_file(str(log_path))
 
     ip_records = [r for r in records if r.rq_type == "IP"]
     if not ip_records:
         logger.info("Aucun record RqType=IP dans %s, rien à exporter.", log_path)
-        return (0, 0)
+        # On archive quand même le .log même s'il n'y a pas de records IP
+        archive_log_file(settings, log_path)
+        return 0
 
     # On met les JSON dans OUTPUT_JSON_DIR, en gardant la structure de dossiers.
     input_dir = Path(settings.input_dir).resolve()
@@ -130,33 +176,10 @@ def process_log_file(settings: AppSettings, log_path: Path) -> Tuple[int, int]:
             json.dump(_record_to_dict(rec), f, ensure_ascii=False)
             f.write("\n")
 
-    # ÉTAPE PERSISTANCE : Sauvegarde en base de données (via SQLAlchemy)
-    persisted_rows = 0
-    try:
-        # On déduit le serveur à partir du premier segment du chemin relatif (INPUT_DIR/<server>/...)
-        try:
-            relative = log_path.resolve().relative_to(input_dir)
-            server_name = relative.parts[0] if isinstance(relative, Path) and len(relative.parts) > 0 else None
-        except Exception:  # noqa: BLE001
-            server_name = None
+    # Archive le .log après génération du JSONL
+    archive_log_file(settings, log_path)
 
-        source_file = log_path.name
-        logger.info("Persistance en base de données pour %s...", source_file)
-        persisted_rows = persist_records(settings, ip_records, server_name=server_name, source_file=source_file)
-        logger.info("✓ Persisté %d lignes de scores biométriques en base pour %s", persisted_rows, source_file)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Erreur lors de la persistance en base pour %s: %s", log_path, exc)
-        # On continue quand même (le JSONL est déjà écrit)
-
-    # ÉTAPE ARCHIVAGE JSONL : Archive le fichier JSONL après persistance
-    if persisted_rows > 0:
-        try:
-            archive_jsonl_file(settings, output_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Erreur lors de l'archivage du JSONL %s: %s", output_path, exc)
-            # On continue quand même (la persistance est déjà faite)
-
-    return (len(ip_records), persisted_rows)
+    return len(ip_records)
 
 
 def archive_jsonl_file(settings: AppSettings, jsonl_path: Path) -> None:
@@ -240,32 +263,130 @@ def archive_log_file(settings: AppSettings, log_path: Path) -> None:
             logger.exception("Impossible de marquer le fichier %s/%s comme traité: %s", server_name, filename, exc)
 
 
-def process_all_logs(settings: AppSettings) -> Tuple[int, int]:
+def _iter_jsonl_files(output_dir: str) -> List[Path]:
     """
-    Traite tous les fichiers .log présents dans INPUT_DIR :
-    - Génère les JSONL correspondants (RqType=IP uniquement)
-    - Archive les .log traités dans ARCHIVE_DIR
+    Retourne la liste des fichiers .jsonl à archiver dans OUTPUT_JSON_DIR.
+    """
+    base = Path(output_dir)
+    if not base.exists():
+        return []
+
+    return sorted(base.rglob("*.jsonl"))
+
+
+def persist_all_jsonl_files(settings: AppSettings) -> Tuple[int, int]:
+    """
+    Persiste tous les fichiers JSONL présents dans OUTPUT_JSON_DIR en base de données,
+    puis archive les JSONL vers ARCHIVE_JSON_DIR.
+
+    - Lit et parse chaque JSONL
+    - Persiste les données en base
+    - Archive les JSONL après persistance réussie
 
     Retourne un tuple (nombre de fichiers traités, nombre total de lignes insérées en base).
     """
-    log_files = _iter_log_files(settings.input_dir)
-    if not log_files:
+    jsonl_files = _iter_jsonl_files(settings.output_json_dir)
+    if not jsonl_files:
         return (0, 0)
 
     processed_files = 0
     total_rows_inserted = 0
+
+    for jsonl_path in jsonl_files:
+        try:
+            jsonl_path_str = str(jsonl_path)
+            logger.info("Traitement du JSONL: %s", jsonl_path)
+
+            # Vérifier si le JSONL a déjà été persisté
+            if is_jsonl_already_persisted(settings, jsonl_path_str):
+                logger.info("JSONL %s déjà persisté, archivage direct.", jsonl_path)
+                archive_jsonl_file(settings, jsonl_path)
+                processed_files += 1
+                continue
+
+            # Lire et parser le JSONL
+            records: List[BiometricsRecord] = []
+            with jsonl_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        record = _dict_to_record(data)
+                        if record.rq_type == "IP":  # On ne garde que les IP
+                            records.append(record)
+                    except (json.JSONDecodeError, Exception) as exc:  # noqa: BLE001
+                        logger.warning("Erreur lors du parsing d'une ligne JSON dans %s: %s", jsonl_path, exc)
+                        continue
+
+            if not records:
+                logger.info("Aucun record RqType=IP dans %s, archivage direct.", jsonl_path)
+                archive_jsonl_file(settings, jsonl_path)
+                processed_files += 1
+                continue
+
+            # Persister en base
+            try:
+                # On déduit le serveur à partir du premier segment du chemin relatif
+                output_base = Path(settings.output_json_dir).resolve()
+                try:
+                    relative = jsonl_path.resolve().relative_to(output_base)
+                    server_name = relative.parts[0] if isinstance(relative, Path) and len(relative.parts) > 0 else None
+                except Exception:  # noqa: BLE001
+                    server_name = None
+
+                source_file = jsonl_path.stem.replace(".log", "") + ".log"  # Retrouve le nom du .log original
+                logger.info("Persistance en base de données pour %s...", source_file)
+                persisted_rows = persist_records(settings, records, server_name=server_name, source_file=source_file)
+                logger.info("✓ Persisté %d lignes de scores biométriques en base pour %s", persisted_rows, source_file)
+                total_rows_inserted += persisted_rows
+
+                # Marquer le JSONL comme persisté dans le state SQLite
+                try:
+                    mark_jsonl_persisted(
+                        settings,
+                        jsonl_path_str,
+                        server_name=server_name,
+                        source_file=source_file,
+                        rows_inserted=persisted_rows,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Impossible de marquer le JSONL %s comme persisté dans le state: %s", jsonl_path, exc)
+
+                # Archiver le JSONL après persistance réussie
+                archive_jsonl_file(settings, jsonl_path)
+                processed_files += 1
+
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Erreur lors de la persistance en base pour %s: %s", jsonl_path, exc)
+                # On n'archive pas si la persistance a échoué
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Erreur lors du traitement du JSONL %s: %s", jsonl_path, exc)
+
+    return (processed_files, total_rows_inserted)
+
+
+def process_all_logs(settings: AppSettings) -> int:
+    """
+    Parse tous les fichiers .log présents dans INPUT_DIR :
+    - Génère les JSONL correspondants (RqType=IP uniquement)
+    - Archive les .log traités dans ARCHIVE_DIR
+
+    Retourne le nombre de fichiers traités.
+    """
+    log_files = _iter_log_files(settings.input_dir)
+    if not log_files:
+        return 0
+
+    processed_files = 0
     for log_path in log_files:
         try:
-            records_count, rows_inserted = process_log_file(settings, log_path)
-            if records_count > 0:
-                archive_log_file(settings, log_path)
-            else:
-                # Si aucun record IP, on peut choisir d'archiver quand même ou de laisser en place.
-                archive_log_file(settings, log_path)
+            process_log_file(settings, log_path)
             processed_files += 1
-            total_rows_inserted += rows_inserted
         except Exception as exc:  # noqa: BLE001
             logger.exception("Erreur lors du traitement de %s: %s", log_path, exc)
 
-    return (processed_files, total_rows_inserted)
+    return processed_files
 
