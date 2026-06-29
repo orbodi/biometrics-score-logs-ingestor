@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
-import re
-from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .config import AppSettings, SshServerConfig
 from .disk_purge import with_disk_purge_retry
 from .permissions import chmod_path, configure_ssh_client, mkdir_p
-from .state import is_file_already_processed
+from .state import mark_file_downloaded, should_skip_file_copy
 
 logger = logging.getLogger(__name__)
 
@@ -18,35 +16,25 @@ def _ensure_input_dir(settings: AppSettings, path: str) -> Path:
     return mkdir_p(settings, Path(path))
 
 
-def _extract_file_date(filename: str):
-    """
-    Extrait une date YYYY-MM-DD du nom de fichier, ou None si introuvable/incorrecte.
-    """
-    m = re.search(r"(\d{4}-\d{2}-\d{2})", filename)
-    if not m:
-        return None
-    try:
-        return datetime.strptime(m.group(1), "%Y-%m-%d").date()
-    except ValueError:
-        return None
+def _is_log_file(filename: str) -> bool:
+    """Indique si le fichier distant doit être collecté."""
+    return filename.lower().endswith(".log")
 
 
 def _collect_from_server(
     settings: AppSettings,
     server: SshServerConfig,
     dest_dir: Path,
-    archive_dir: Path,
     username: str,
     password: str,
     timeout: int,
-    threshold,
 ) -> int:
     """
     Copie les fichiers .log depuis un serveur distant via SSH/SFTP.
 
     Règles :
     - On liste le répertoire `remote_dir`
-    - On copie uniquement les fichiers se terminant par `.log`
+    - On copie tous les fichiers se terminant par `.log`
     - On ne recopie pas un fichier déjà présent localement (même nom)
     """
     downloaded = 0
@@ -69,54 +57,31 @@ def _collect_from_server(
 
         for attr in sftp.listdir_attr(server.remote_dir):
             filename = attr.filename
-            if not filename.lower().endswith(".log"):
-                continue
-
-            # Filtrage par date dans le nom du fichier (YYYY-MM-DD)
-            file_date = _extract_file_date(filename)
-            if not file_date:
-                logger.debug(
-                    "Nom de fichier sans date valide, on ignore pour le serveur %s: %s",
-                    server.name,
-                    filename,
-                )
-                continue
-            if file_date > threshold:
-                logger.debug(
-                    "Fichier trop récent pour le serveur %s (date=%s > seuil=%s), on ignore: %s",
-                    server.name,
-                    file_date,
-                    threshold,
-                    filename,
-                )
+            if not _is_log_file(filename):
                 continue
 
             remote_path = os.path.join(server.remote_dir, filename)
             local_path = server_dest_dir / filename
 
-            # Vérifie si le fichier a déjà été traité selon le state SQLite.
-            if is_file_already_processed(settings, server.name, filename):
-                logger.debug(
-                    "Fichier déjà marqué comme traité (state) pour le serveur %s, on ignore: %s",
+            skip, reason = should_skip_file_copy(settings, server.name, filename)
+            if skip:
+                logger.info(
+                    "Copie ignorée pour %s/%s : %s",
                     server.name,
                     filename,
-                )
-                continue
-
-            # Vérifie aussi la présence locale ou archivée (sécurité supplémentaire).
-            archived_path = archive_dir / server.name / filename
-            if local_path.exists() or archived_path.exists():
-                logger.debug(
-                    "Fichier déjà présent localement ou archivé pour le serveur %s, on ignore: %s (ou archivé: %s)",
-                    server.name,
-                    local_path,
-                    archived_path,
+                    reason,
                 )
                 continue
 
             logger.info("Téléchargement de %s vers %s", remote_path, local_path)
             with_disk_purge_retry(settings, lambda: sftp.get(remote_path, str(local_path)))
             chmod_path(settings, local_path, is_dir=False)
+            mark_file_downloaded(
+                settings,
+                server.name,
+                filename,
+                file_size=local_path.stat().st_size,
+            )
             downloaded += 1
     finally:
         ssh.close()
@@ -135,12 +100,9 @@ def collect_from_servers(settings: AppSettings) -> int:
         return 0
 
     dest_dir = _ensure_input_dir(settings, settings.input_dir)
-    archive_dir = Path(settings.archive_dir).resolve()
-
-    # Seuil de date : on ne traite que les fichiers datés de la veille et avant.
-    today = date.today()
-    threshold = today - timedelta(days=1)
     total = 0
+
+    logger.info("Collecte de tous les fichiers .log disponibles dans les dossiers distants.")
 
     if not settings.ssh_user or not settings.ssh_password:
         logger.error("SSH_USER ou SSH_PASSWORD non configuré dans l'environnement.")
@@ -152,11 +114,9 @@ def collect_from_servers(settings: AppSettings) -> int:
                 settings,
                 server,
                 dest_dir,
-                archive_dir,
                 settings.ssh_user,
                 settings.ssh_password,
                 settings.ssh_timeout,
-                threshold,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Erreur lors de la collecte depuis %s (%s): %s", server.host, server.name, exc)

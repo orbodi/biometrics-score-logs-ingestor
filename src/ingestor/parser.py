@@ -1,5 +1,8 @@
+from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+import gzip
 
 
 @dataclass
@@ -231,14 +234,46 @@ def parse_line(line: str) -> BiometricsRecord:
     return record
 
 
+def read_log_text(path: str) -> str:
+    """
+    Lit un fichier de log en détectant l'encodage (UTF-8/BOM, UTF-16, gzip).
+    """
+    raw = Path(path).read_bytes()
+    if not raw:
+        return ""
+
+    if len(raw) >= 2 and raw[:2] == b"\x1f\x8b":
+        return gzip.decompress(raw).decode("utf-8", errors="replace")
+
+    if raw.startswith(b"\xff\xfe"):
+        return raw.decode("utf-16-le", errors="replace")
+    if raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16-be", errors="replace")
+
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    return raw.decode("utf-8", errors="replace")
+
+
 def parse_file(path: str) -> List[BiometricsRecord]:
     """Parse un fichier de logs complet et renvoie une liste de records."""
     records: List[BiometricsRecord] = []
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            records.append(parse_line(line))
+    for line in read_log_text(path).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        records.append(parse_line(line))
     return records
+
+
+def summarize_rq_types(records: List[BiometricsRecord]) -> Dict[str, int]:
+    """Compte les lignes par RqType (utile pour le diagnostic)."""
+    counts: Counter[str] = Counter()
+    for record in records:
+        counts[record.rq_type or "(vide)"] += 1
+    return dict(counts)
 

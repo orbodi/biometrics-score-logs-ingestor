@@ -10,7 +10,7 @@ from .config import AppSettings
 from .db import persist_records
 from .disk_purge import with_disk_purge_retry
 from .permissions import chmod_path, mkdir_p
-from .parser import BiometricsRecord, FingerprintSample, parse_file
+from .parser import BiometricsRecord, FingerprintSample, parse_file, summarize_rq_types
 from .state import (
     is_jsonl_already_persisted,
     mark_file_processed,
@@ -157,8 +157,15 @@ def process_log_file(settings: AppSettings, log_path: Path) -> int:
 
     ip_records = [r for r in records if r.rq_type == "IP"]
     if not ip_records:
-        logger.info("Aucun record RqType=IP dans %s, rien à exporter.", log_path)
-        # On archive quand même le .log même s'il n'y a pas de records IP
+        file_size = log_path.stat().st_size if log_path.exists() else 0
+        rq_summary = summarize_rq_types(records)
+        logger.warning(
+            "Aucun record RqType=IP dans %s (%d octets, %d ligne(s) parsée(s), RqTypes: %s)",
+            log_path,
+            file_size,
+            len(records),
+            rq_summary or "fichier vide",
+        )
         archive_log_file(settings, log_path)
         return 0
 

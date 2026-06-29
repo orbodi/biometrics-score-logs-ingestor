@@ -3,7 +3,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .config import AppSettings
 from .disk_purge import with_disk_purge_retry
@@ -12,7 +12,9 @@ from .permissions import mkdir_p
 
 def _get_db_path(settings: AppSettings) -> Path:
     """Retourne le chemin absolu vers le fichier SQLite de state."""
-    return Path(settings.state_db_path)
+    path = Path(settings.state_db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -63,6 +65,101 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+
+
+def _log_artifact_paths(settings: AppSettings, server_name: str, filename: str) -> dict:
+    """Chemins locaux possibles pour un fichier .log et ses dérivés."""
+    return {
+        "input": Path(settings.input_dir) / server_name / filename,
+        "archive": Path(settings.archive_dir) / server_name / filename,
+        "output_jsonl": Path(settings.output_json_dir) / server_name / f"{filename}.jsonl",
+        "archive_jsonl": Path(settings.archive_json_dir) / server_name / f"{filename}.jsonl",
+    }
+
+
+def _ensure_downloaded_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS downloaded_files (
+            server_name TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            downloaded_at TEXT NOT NULL,
+            file_size INTEGER,
+            PRIMARY KEY (server_name, filename)
+        )
+        """
+    )
+
+
+def is_file_already_downloaded(settings: AppSettings, server_name: str, filename: str) -> bool:
+    """Retourne True si ce fichier a déjà été copié depuis le serveur distant."""
+    db_path = _get_db_path(settings)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _ensure_schema(conn)
+        _ensure_downloaded_schema(conn)
+        cur = conn.execute(
+            "SELECT 1 FROM downloaded_files WHERE server_name = ? AND filename = ? LIMIT 1",
+            (server_name, filename),
+        )
+        return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def mark_file_downloaded(
+    settings: AppSettings,
+    server_name: str,
+    filename: str,
+    file_size: Optional[int] = None,
+) -> None:
+    """Enregistre qu'un fichier .log a été copié avec succès (une seule fois)."""
+    db_path = _get_db_path(settings)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _ensure_schema(conn)
+        _ensure_downloaded_schema(conn)
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        conn.execute(
+            """
+            INSERT INTO downloaded_files (server_name, filename, downloaded_at, file_size)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(server_name, filename) DO NOTHING
+            """,
+            (server_name, filename, now, file_size),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def should_skip_file_copy(
+    settings: AppSettings,
+    server_name: str,
+    filename: str,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Indique si la copie SSH doit être ignorée pour éviter un doublon.
+    Retourne (True, raison) si le fichier ne doit pas être recopié.
+    """
+    if is_file_already_downloaded(settings, server_name, filename):
+        return True, "déjà copié (state)"
+
+    if is_file_already_processed(settings, server_name, filename):
+        return True, "déjà traité (state)"
+
+    paths = _log_artifact_paths(settings, server_name, filename)
+    for label, path in paths.items():
+        if path.exists():
+            mark_file_downloaded(
+                settings,
+                server_name,
+                filename,
+                file_size=path.stat().st_size if path.is_file() else None,
+            )
+            return True, f"déjà présent ({label})"
+
+    return False, None
 
 
 def is_file_already_processed(settings: AppSettings, server_name: str, filename: str) -> bool:
