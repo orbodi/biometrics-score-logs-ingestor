@@ -11,8 +11,6 @@ venv/
 sample-data/
 ./sample-data/
 .DS_Store
-logs/
-*.log
-tmp/
+data/
 *.sqlite3
 *.db

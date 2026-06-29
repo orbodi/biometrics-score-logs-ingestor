@@ -1,25 +1,18 @@
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from .config import AppSettings
+from .disk_purge import with_disk_purge_retry
+from .permissions import mkdir_p
 
 
 def _get_db_path(settings: AppSettings) -> Path:
-    """
-    Retourne le chemin absolu vers le fichier SQLite de state.
-    Par défaut : <project_root>/state/ingestor_state.db
-    """
-    raw = getattr(settings, "state_db_path", "state/ingestor_state.db")
-    path = Path(raw)
-    if not path.is_absolute():
-        # project_root = src/ingestor/.. /..
-        project_root = Path(__file__).resolve().parent.parent.parent
-        path = project_root / raw
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    """Retourne le chemin absolu vers le fichier SQLite de state."""
+    return Path(settings.state_db_path)
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -47,6 +40,25 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             rows_inserted INTEGER,
             first_persisted_at TEXT NOT NULL,
             last_persisted_at TEXT NOT NULL
+        )
+        """
+    )
+    # Table pour les erreurs d'opération (persistance DB, etc.)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS operation_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation TEXT NOT NULL,
+            resource_key TEXT NOT NULL,
+            server_name TEXT,
+            source_file TEXT,
+            error_type TEXT,
+            error_message TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 1,
+            first_failed_at TEXT NOT NULL,
+            last_failed_at TEXT NOT NULL,
+            resolved INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(operation, resource_key)
         )
         """
     )
@@ -168,4 +180,196 @@ def mark_jsonl_persisted(
         conn.commit()
     finally:
         conn.close()
+
+
+@dataclass
+class OperationError:
+    id: int
+    operation: str
+    resource_key: str
+    server_name: Optional[str]
+    source_file: Optional[str]
+    error_type: Optional[str]
+    error_message: str
+    attempt_count: int
+    first_failed_at: str
+    last_failed_at: str
+
+
+def record_operation_error(
+    settings: AppSettings,
+    operation: str,
+    resource_key: str,
+    exc: BaseException,
+    *,
+    server_name: Optional[str] = None,
+    source_file: Optional[str] = None,
+) -> None:
+    """Enregistre ou met à jour une erreur d'opération dans le state SQLite."""
+    db_path = _get_db_path(settings)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _ensure_schema(conn)
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        error_type = type(exc).__name__
+        error_message = str(exc)
+
+        cur = conn.execute(
+            "SELECT id, attempt_count, first_failed_at FROM operation_errors "
+            "WHERE operation = ? AND resource_key = ? AND resolved = 0",
+            (operation, resource_key),
+        )
+        row = cur.fetchone()
+        if row:
+            attempt_count = row[1] + 1
+            first_failed_at = row[2]
+            conn.execute(
+                """
+                UPDATE operation_errors SET
+                    server_name = ?,
+                    source_file = ?,
+                    error_type = ?,
+                    error_message = ?,
+                    attempt_count = ?,
+                    last_failed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    server_name,
+                    source_file,
+                    error_type,
+                    error_message,
+                    attempt_count,
+                    now,
+                    row[0],
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO operation_errors (
+                    operation, resource_key, server_name, source_file,
+                    error_type, error_message, attempt_count,
+                    first_failed_at, last_failed_at, resolved
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 0)
+                """,
+                (
+                    operation,
+                    resource_key,
+                    server_name,
+                    source_file,
+                    error_type,
+                    error_message,
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def resolve_operation_error(settings: AppSettings, operation: str, resource_key: str) -> None:
+    """Marque une erreur comme résolue après succès de l'opération."""
+    db_path = _get_db_path(settings)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _ensure_schema(conn)
+        conn.execute(
+            "UPDATE operation_errors SET resolved = 1 WHERE operation = ? AND resource_key = ? AND resolved = 0",
+            (operation, resource_key),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def count_unresolved_errors(settings: AppSettings, operation: Optional[str] = None) -> int:
+    """Compte les erreurs non résolues, optionnellement filtrées par type d'opération."""
+    db_path = _get_db_path(settings)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _ensure_schema(conn)
+        if operation:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM operation_errors WHERE resolved = 0 AND operation = ?",
+                (operation,),
+            )
+        else:
+            cur = conn.execute("SELECT COUNT(*) FROM operation_errors WHERE resolved = 0")
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
+def list_unresolved_errors(
+    settings: AppSettings,
+    operation: Optional[str] = None,
+) -> List[OperationError]:
+    """Liste les erreurs non résolues."""
+    db_path = _get_db_path(settings)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _ensure_schema(conn)
+        if operation:
+            cur = conn.execute(
+                """
+                SELECT id, operation, resource_key, server_name, source_file,
+                       error_type, error_message, attempt_count,
+                       first_failed_at, last_failed_at
+                FROM operation_errors
+                WHERE resolved = 0 AND operation = ?
+                ORDER BY last_failed_at DESC
+                """,
+                (operation,),
+            )
+        else:
+            cur = conn.execute(
+                """
+                SELECT id, operation, resource_key, server_name, source_file,
+                       error_type, error_message, attempt_count,
+                       first_failed_at, last_failed_at
+                FROM operation_errors
+                WHERE resolved = 0
+                ORDER BY last_failed_at DESC
+                """
+            )
+        return [
+            OperationError(
+                id=row[0],
+                operation=row[1],
+                resource_key=row[2],
+                server_name=row[3],
+                source_file=row[4],
+                error_type=row[5],
+                error_message=row[6],
+                attempt_count=row[7],
+                first_failed_at=row[8],
+                last_failed_at=row[9],
+            )
+            for row in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def _resolve_error_storage_dir(settings: AppSettings) -> Path:
+    return Path(settings.error_storage_dir)
+
+
+def store_failed_resource(settings: AppSettings, source_path: Path, operation: str) -> Path:
+    """
+    Copie un fichier en échec vers ERROR_STORAGE_DIR/<operation>/ pour retraitement manuel.
+    Retourne le chemin de destination.
+    """
+    storage_dir = mkdir_p(settings, _resolve_error_storage_dir(settings) / operation)
+
+    dest = storage_dir / source_path.name
+    if dest.exists():
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        dest = storage_dir / f"{source_path.stem}_{ts}{source_path.suffix}"
+
+    with_disk_purge_retry(settings, lambda: shutil.copy2(str(source_path), str(dest)))
+    return dest
 

@@ -6,18 +6,16 @@ import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import paramiko
-
 from .config import AppSettings, SshServerConfig
+from .disk_purge import with_disk_purge_retry
+from .permissions import chmod_path, configure_ssh_client, mkdir_p
 from .state import is_file_already_processed
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_input_dir(path: str) -> Path:
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+def _ensure_input_dir(settings: AppSettings, path: str) -> Path:
+    return mkdir_p(settings, Path(path))
 
 
 def _extract_file_date(filename: str):
@@ -53,8 +51,7 @@ def _collect_from_server(
     """
     downloaded = 0
 
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh = configure_ssh_client(settings)
 
     logger.info("Connexion SSH à %s@%s (timeout: %ds)", username, server.host, timeout)
     try:
@@ -68,8 +65,7 @@ def _collect_from_server(
         logger.info("Listing distant %s (%s)", server.remote_dir, server.name)
 
         # Répertoire local spécifique à ce serveur pour éviter les collisions de noms
-        server_dest_dir = dest_dir / server.name
-        server_dest_dir.mkdir(parents=True, exist_ok=True)
+        server_dest_dir = mkdir_p(settings, dest_dir / server.name)
 
         for attr in sftp.listdir_attr(server.remote_dir):
             filename = attr.filename
@@ -119,7 +115,8 @@ def _collect_from_server(
                 continue
 
             logger.info("Téléchargement de %s vers %s", remote_path, local_path)
-            sftp.get(remote_path, str(local_path))
+            with_disk_purge_retry(settings, lambda: sftp.get(remote_path, str(local_path)))
+            chmod_path(settings, local_path, is_dir=False)
             downloaded += 1
     finally:
         ssh.close()
@@ -137,7 +134,7 @@ def collect_from_servers(settings: AppSettings) -> int:
         logger.warning("Aucun serveur SSH configuré (SSH_SERVERS vide).")
         return 0
 
-    dest_dir = _ensure_input_dir(settings.input_dir)
+    dest_dir = _ensure_input_dir(settings, settings.input_dir)
     archive_dir = Path(settings.archive_dir).resolve()
 
     # Seuil de date : on ne traite que les fichiers datés de la veille et avant.

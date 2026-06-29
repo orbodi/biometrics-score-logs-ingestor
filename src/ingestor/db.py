@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from .config import AppSettings
 from .models import Base, BiometricScore, configure_schema
 from .parser import BiometricsRecord
+from .permissions import grant_db_permissions
+from .retry import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -49,31 +51,36 @@ def init_schema(settings: AppSettings) -> None:
     Initialise la base de données :
     1. Crée le schéma PostgreSQL s'il n'existe pas
     2. Crée les tables si elles n'existent pas (basé sur les modèles SQLAlchemy).
-    
+
     Configure le schéma depuis les settings avant création.
     """
     assert settings.db is not None, "Database settings must be configured"
     schema = settings.db.schema
-    
-    # Validation du nom de schéma (sécurité : éviter l'injection SQL)
+
     if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", schema):
         raise ValueError(f"Invalid schema name: '{schema}'. Must be a valid PostgreSQL identifier.")
-    
-    engine = get_engine(settings)
-    
-    # Créer le schéma s'il n'existe pas (sauf pour 'public' qui existe toujours)
-    if schema != "public":
-        with engine.connect() as conn:
-            # Utiliser text() pour exécuter du SQL brut
-            # Note: on valide le nom du schéma ci-dessus pour éviter l'injection SQL
-            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
-            conn.commit()
-        logger.info("Schema '%s' created if needed", schema)
-    
-    # Configurer le schéma pour les modèles et créer les tables
-    configure_schema(schema)
-    Base.metadata.create_all(engine)
-    logger.info("Database initialized (tables created if needed in schema '%s')", schema)
+
+    def _init() -> None:
+        engine = get_engine(settings)
+
+        if schema != "public":
+            with engine.connect() as conn:
+                conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+                conn.commit()
+            logger.info("Schema '%s' created if needed", schema)
+
+        configure_schema(schema)
+        Base.metadata.create_all(engine)
+        grant_db_permissions(settings, engine)
+        logger.info("Database initialized (tables created if needed in schema '%s')", schema)
+
+    with_retry(
+        _init,
+        max_attempts=settings.db_retry_max_attempts,
+        delay_seconds=settings.db_retry_delay_seconds,
+        backoff=settings.db_retry_backoff,
+        operation_name="init_schema",
+    )
 
 
 def _extract_date_from_filename(filename: Optional[str]) -> Optional[date]:
@@ -208,32 +215,36 @@ def persist_records(
     Persiste une liste de records IP en base via SQLAlchemy.
 
     Transforme chaque BiometricsRecord en plusieurs lignes BiometricScore (face, iris, doigts)
-    et les insère en bulk pour performance.
+    et les insère en bulk pour performance, avec retry sur erreurs transitoires.
     """
-    session = get_session(settings)
-    total_inserted = 0
+    all_scores: List[BiometricScore] = []
+    for rec in records:
+        if rec.rq_type != "IP":
+            continue
+        all_scores.extend(_record_to_biometric_scores(rec, server_name, source_file))
 
-    try:
-        all_scores: List[BiometricScore] = []
-        for rec in records:
-            if rec.rq_type != "IP":
-                # On ne persiste que les IP pour l'instant
-                continue
-            all_scores.extend(_record_to_biometric_scores(rec, server_name, source_file))
+    if not all_scores:
+        logger.info("No IP records to persist")
+        return 0
 
-        if all_scores:
+    def _do_persist() -> int:
+        session = get_session(settings)
+        try:
             session.bulk_save_objects(all_scores)
             session.commit()
-            total_inserted = len(all_scores)
-            logger.info("Persisted %d biometric score rows into database", total_inserted)
-        else:
-            logger.info("No IP records to persist")
-    except Exception as exc:
-        session.rollback()
-        logger.exception("Error persisting records: %s", exc)
-        raise
-    finally:
-        session.close()
+            logger.info("Persisted %d biometric score rows into database", len(all_scores))
+            return len(all_scores)
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
-    return total_inserted
+    return with_retry(
+        _do_persist,
+        max_attempts=settings.db_retry_max_attempts,
+        delay_seconds=settings.db_retry_delay_seconds,
+        backoff=settings.db_retry_backoff,
+        operation_name=f"persist_records({source_file or 'unknown'})",
+    )
 

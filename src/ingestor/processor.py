@@ -8,10 +8,21 @@ from typing import List, Tuple
 
 from .config import AppSettings
 from .db import persist_records
+from .disk_purge import with_disk_purge_retry
+from .permissions import chmod_path, mkdir_p
 from .parser import BiometricsRecord, FingerprintSample, parse_file
-from .state import is_jsonl_already_persisted, mark_file_processed, mark_jsonl_persisted
+from .state import (
+    is_jsonl_already_persisted,
+    mark_file_processed,
+    mark_jsonl_persisted,
+    record_operation_error,
+    resolve_operation_error,
+    store_failed_resource,
+)
 
 logger = logging.getLogger(__name__)
+
+DB_PERSIST_OPERATION = "db_persist"
 
 
 def _iter_log_files(input_dir: str) -> List[Path]:
@@ -168,13 +179,18 @@ def process_log_file(settings: AppSettings, log_path: Path) -> int:
     else:
         output_path = output_base / relative
     output_path = output_path.with_suffix(output_path.suffix + ".jsonl")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_p(settings, output_path.parent)
 
     logger.info("Écriture du JSONL de %s vers %s", log_path, output_path)
-    with output_path.open("w", encoding="utf-8") as f:
-        for rec in ip_records:
-            json.dump(_record_to_dict(rec), f, ensure_ascii=False)
-            f.write("\n")
+
+    def _write_jsonl() -> None:
+        with output_path.open("w", encoding="utf-8") as f:
+            for rec in ip_records:
+                json.dump(_record_to_dict(rec), f, ensure_ascii=False)
+                f.write("\n")
+
+    with_disk_purge_retry(settings, _write_jsonl)
+    chmod_path(settings, output_path, is_dir=False)
 
     # Archive le .log après génération du JSONL
     archive_log_file(settings, log_path)
@@ -200,9 +216,9 @@ def archive_jsonl_file(settings: AppSettings, jsonl_path: Path) -> None:
     else:
         dest_path = archive_base / relative
 
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_p(settings, dest_path.parent)
     logger.info("Archivage du JSONL %s vers %s...", jsonl_path, dest_path)
-    shutil.move(str(jsonl_path), str(dest_path))
+    with_disk_purge_retry(settings, lambda: shutil.move(str(jsonl_path), str(dest_path)))
     logger.info("✓ Fichier JSONL archivé avec succès")
 
 
@@ -224,9 +240,9 @@ def archive_log_file(settings: AppSettings, log_path: Path) -> None:
     else:
         dest_path = archive_base / relative
 
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_p(settings, dest_path.parent)
     logger.info("Archivage de %s vers %s...", log_path, dest_path)
-    shutil.move(str(log_path), str(dest_path))
+    with_disk_purge_retry(settings, lambda: shutil.move(str(log_path), str(dest_path)))
     logger.info("✓ Fichier archivé avec succès")
 
     # Marque le fichier comme traité dans le state SQLite.
@@ -274,23 +290,25 @@ def _iter_jsonl_files(output_dir: str) -> List[Path]:
     return sorted(base.rglob("*.jsonl"))
 
 
-def persist_all_jsonl_files(settings: AppSettings) -> Tuple[int, int]:
+def persist_all_jsonl_files(settings: AppSettings) -> Tuple[int, int, int]:
     """
     Persiste tous les fichiers JSONL présents dans OUTPUT_JSON_DIR en base de données,
     puis archive les JSONL vers ARCHIVE_JSON_DIR.
 
     - Lit et parse chaque JSONL
-    - Persiste les données en base
+    - Persiste les données en base (avec retry DB)
     - Archive les JSONL après persistance réussie
+    - Enregistre les échecs dans le state SQLite et copie vers ERROR_STORAGE_DIR
 
-    Retourne un tuple (nombre de fichiers traités, nombre total de lignes insérées en base).
+    Retourne (fichiers traités, lignes insérées, échecs de persistance).
     """
     jsonl_files = _iter_jsonl_files(settings.output_json_dir)
     if not jsonl_files:
-        return (0, 0)
+        return (0, 0, 0)
 
     processed_files = 0
     total_rows_inserted = 0
+    persist_failures = 0
 
     for jsonl_path in jsonl_files:
         try:
@@ -342,6 +360,8 @@ def persist_all_jsonl_files(settings: AppSettings) -> Tuple[int, int]:
                 logger.info("✓ Persisté %d lignes de scores biométriques en base pour %s", persisted_rows, source_file)
                 total_rows_inserted += persisted_rows
 
+                resolve_operation_error(settings, DB_PERSIST_OPERATION, jsonl_path_str)
+
                 # Marquer le JSONL comme persisté dans le state SQLite
                 try:
                     mark_jsonl_persisted(
@@ -360,12 +380,33 @@ def persist_all_jsonl_files(settings: AppSettings) -> Tuple[int, int]:
 
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Erreur lors de la persistance en base pour %s: %s", jsonl_path, exc)
-                # On n'archive pas si la persistance a échoué
+                persist_failures += 1
+                try:
+                    record_operation_error(
+                        settings,
+                        DB_PERSIST_OPERATION,
+                        jsonl_path_str,
+                        exc,
+                        server_name=server_name,
+                        source_file=source_file,
+                    )
+                    stored_path = store_failed_resource(settings, jsonl_path, DB_PERSIST_OPERATION)
+                    logger.error(
+                        "Échec persisté (state + copie): %s -> %s",
+                        jsonl_path,
+                        stored_path,
+                    )
+                except Exception as storage_exc:  # noqa: BLE001
+                    logger.exception(
+                        "Impossible d'enregistrer l'échec pour %s: %s",
+                        jsonl_path,
+                        storage_exc,
+                    )
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("Erreur lors du traitement du JSONL %s: %s", jsonl_path, exc)
 
-    return (processed_files, total_rows_inserted)
+    return (processed_files, total_rows_inserted, persist_failures)
 
 
 def process_all_logs(settings: AppSettings) -> int:

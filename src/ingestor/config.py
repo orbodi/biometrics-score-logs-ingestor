@@ -6,6 +6,73 @@ from typing import List, Optional
 
 from dotenv import load_dotenv
 
+# Sous-dossiers créés automatiquement sous ROOT_DIR
+WORKSPACE_INPUT = "inputs"
+WORKSPACE_OUTPUT = "outputs"
+WORKSPACE_ARCHIVE = "archive"
+WORKSPACE_ARCHIVE_JSON = "archive_json"
+WORKSPACE_LOGS = "logs"
+WORKSPACE_ERRORS = "errors"
+WORKSPACE_STATE_DIR = "state"
+WORKSPACE_STATE_DB = "ingestor_state.db"
+
+
+def project_root() -> Path:
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def resolve_root_dir(root_dir: str) -> Path:
+    path = Path(root_dir)
+    if not path.is_absolute():
+        path = project_root() / root_dir
+    return path
+
+
+def workspace_paths_from_root(root_dir: str) -> dict:
+    """Dérive tous les chemins de travail à partir de ROOT_DIR."""
+    root = resolve_root_dir(root_dir)
+    return {
+        "root_dir": str(root),
+        "input_dir": str(root / WORKSPACE_INPUT),
+        "output_json_dir": str(root / WORKSPACE_OUTPUT),
+        "archive_dir": str(root / WORKSPACE_ARCHIVE),
+        "archive_json_dir": str(root / WORKSPACE_ARCHIVE_JSON),
+        "execution_log_dir": str(root / WORKSPACE_LOGS),
+        "error_storage_dir": str(root / WORKSPACE_ERRORS),
+        "state_db_path": str(root / WORKSPACE_STATE_DIR / WORKSPACE_STATE_DB),
+    }
+
+
+def parse_permission_mode(raw: str, default: int) -> int:
+    """Parse un mode Unix depuis .env (ex: 775, 0o775)."""
+    value = raw.strip().lower()
+    if not value:
+        return default
+    if value.startswith("0o"):
+        return int(value, 8)
+    if value.isdigit():
+        return int(value, 8)
+    return default
+
+
+def ensure_workspace_dirs(settings: "AppSettings") -> None:
+    """Crée ROOT_DIR et tous les sous-dossiers s'ils n'existent pas."""
+    from .permissions import apply_workspace_permissions, mkdir_p
+
+    root = resolve_root_dir(settings.root_dir)
+    mkdir_p(settings, root)
+    for subdir in (
+        WORKSPACE_INPUT,
+        WORKSPACE_OUTPUT,
+        WORKSPACE_ARCHIVE,
+        WORKSPACE_ARCHIVE_JSON,
+        WORKSPACE_LOGS,
+        WORKSPACE_ERRORS,
+        WORKSPACE_STATE_DIR,
+    ):
+        mkdir_p(settings, root / subdir)
+    apply_workspace_permissions(settings)
+
 
 @dataclass
 class DatabaseSettings:
@@ -21,16 +88,30 @@ class DatabaseSettings:
 class AppSettings:
     log_level: str = "INFO"
     db: Optional[DatabaseSettings] = None
-    input_dir: str = "inputs"
-    output_json_dir: str = "outputs"
-    archive_dir: str = "archive"
-    archive_json_dir: str = "archive_json"
-    execution_log_dir: str = "logs"
-    state_db_path: str = "state/ingestor_state.db"
+    init_db: bool = False
+    root_dir: str = "data"
+    input_dir: str = "data/inputs"
+    output_json_dir: str = "data/outputs"
+    archive_dir: str = "data/archive"
+    archive_json_dir: str = "data/archive_json"
+    execution_log_dir: str = "data/logs"
+    state_db_path: str = "data/state/ingestor_state.db"
     ssh_servers: Optional[List["SshServerConfig"]] = None
     ssh_user: Optional[str] = None
     ssh_password: Optional[str] = None
     ssh_timeout: int = 30
+    db_retry_max_attempts: int = 3
+    db_retry_delay_seconds: float = 2.0
+    db_retry_backoff: float = 2.0
+    error_storage_dir: str = "data/errors"
+    disk_purge_enabled: bool = True
+    disk_min_free_mb: int = 500
+    disk_purge_target_free_mb: int = 1024
+    disk_purge_max_files: int = 500
+    auto_grant_permissions: bool = True
+    dir_permission_mode: int = 0o775
+    file_permission_mode: int = 0o664
+    ssh_auto_accept_host_key: bool = True
 
 
 @dataclass
@@ -135,18 +216,30 @@ def load_settings() -> AppSettings:
         # Fallback sur l'ancien format basé sur SSH_SERVERS
         ssh_servers = _parse_ssh_servers(os.getenv("SSH_SERVERS"))
 
-    return AppSettings(
+    root_dir = os.getenv("ROOT_DIR", "data")
+    workspace = workspace_paths_from_root(root_dir)
+
+    settings = AppSettings(
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         db=db,
-        input_dir=os.getenv("INPUT_DIR", "inputs"),
-        output_json_dir=os.getenv("OUTPUT_JSON_DIR", "outputs"),
-        archive_dir=os.getenv("ARCHIVE_DIR", "archive"),
-        archive_json_dir=os.getenv("ARCHIVE_JSON_DIR", "archive_json"),
-        execution_log_dir=os.getenv("EXECUTION_LOG_DIR", "logs"),
-        state_db_path=os.getenv("STATE_DB_PATH", "state/ingestor_state.db"),
+        init_db=os.getenv("INIT_DB", "false").lower() in ("true", "1", "yes"),
+        **workspace,
         ssh_servers=ssh_servers,
         ssh_user=os.getenv("SSH_USER"),
         ssh_password=os.getenv("SSH_PASSWORD"),
         ssh_timeout=int(os.getenv("SSH_TIMEOUT", "30")),
+        db_retry_max_attempts=int(os.getenv("DB_RETRY_MAX_ATTEMPTS", "3")),
+        db_retry_delay_seconds=float(os.getenv("DB_RETRY_DELAY_SECONDS", "2.0")),
+        db_retry_backoff=float(os.getenv("DB_RETRY_BACKOFF", "2.0")),
+        disk_purge_enabled=os.getenv("DISK_PURGE_ENABLED", "true").lower() in ("true", "1", "yes"),
+        disk_min_free_mb=int(os.getenv("DISK_MIN_FREE_MB", "500")),
+        disk_purge_target_free_mb=int(os.getenv("DISK_PURGE_TARGET_FREE_MB", "1024")),
+        disk_purge_max_files=int(os.getenv("DISK_PURGE_MAX_FILES", "500")),
+        auto_grant_permissions=os.getenv("AUTO_GRANT_PERMISSIONS", "true").lower() in ("true", "1", "yes"),
+        dir_permission_mode=parse_permission_mode(os.getenv("DIR_PERMISSION_MODE", "775"), 0o775),
+        file_permission_mode=parse_permission_mode(os.getenv("FILE_PERMISSION_MODE", "664"), 0o664),
+        ssh_auto_accept_host_key=os.getenv("SSH_AUTO_ACCEPT_HOST_KEY", "true").lower() in ("true", "1", "yes"),
     )
+    ensure_workspace_dirs(settings)
+    return settings
 
